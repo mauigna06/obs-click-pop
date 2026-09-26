@@ -67,7 +67,7 @@ def test_cleanup_sources_releases_all(obs_script, mock_obs):
     obs_script._cleanup_sources()
 
     max_c = obs_script._settings["max_circles"]
-    expected_count = max_c * 2  # L + R prefixes
+    expected_count = max_c * 2 + obs_script._TRAIL_MAX_SEGMENTS * 2
 
     assert mock_obs.obs_sceneitem_remove.call_count == expected_count
     assert mock_obs.obs_source_remove.call_count == expected_count

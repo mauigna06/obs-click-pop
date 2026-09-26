@@ -1,3 +1,6 @@
+import math
+
+
 def find_display_for_point(x, y, displays):
     """Return the display dict whose bounds contain (x, y), or None.
 
@@ -31,6 +34,30 @@ def map_coords(x, y, canvas_w, canvas_h, monitor_w, monitor_h, circle_size,
     obs_x = capture_pos_x + cropped_x * capture_scale_x - circle_size / 2
     obs_y = capture_pos_y + cropped_y * capture_scale_y - circle_size / 2
     return (obs_x, obs_y)
+
+
+def trail_sample_reached(start_x, start_y, end_x, end_y, spacing):
+    """Return whether a pointer move is far enough to emit a trail segment."""
+    return math.hypot(end_x - start_x, end_y - start_y) >= spacing
+
+
+def trail_segment_transform(start_x, start_y, end_x, end_y, line_width):
+    """Return the center, rotation, and size of a line segment.
+
+    The segment extends half a line width beyond each endpoint so consecutive
+    segments overlap at their joins.  ``None`` is returned for a zero-length
+    span.
+    """
+    delta_x = end_x - start_x
+    delta_y = end_y - start_y
+    length = math.hypot(delta_x, delta_y)
+    if length == 0:
+        return None
+
+    center_x = (start_x + end_x) / 2
+    center_y = (start_y + end_y) / 2
+    rotation = math.degrees(math.atan2(delta_y, delta_x))
+    return (center_x, center_y, rotation, length + line_width, line_width)
 
 
 def allocate_slot(prefix, max_circles, active_clicks):

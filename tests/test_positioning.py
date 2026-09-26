@@ -4,6 +4,19 @@ import pytest
 from tests.conftest import Vec2
 
 
+def test_desktop_point_mapping_preserves_circle_centering(obs_script):
+    obs_script._settings["monitor_w"] = 1920
+    obs_script._settings["monitor_h"] = 1080
+    obs_script._settings["capture_source"] = ""
+    obs_script._all_displays = []
+
+    mapped = obs_script._map_desktop_point(100, 200, 80)
+
+    obs_x, obs_y, route = mapped
+    assert (obs_x, obs_y) == pytest.approx((60, 160))
+    assert route == (None, "")
+
+
 def test_position_values(obs_script, mock_obs):
     """_show_source sets position via obs_sceneitem_set_pos with a Vec2."""
     mock_obs.obs_scene_find_source.return_value = None  # create path

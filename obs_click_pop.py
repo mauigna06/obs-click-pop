@@ -4,7 +4,14 @@ import time
 import os
 from collections import deque
 
-from click_pop_core import map_coords, allocate_slot, expire_circles, find_display_for_point
+from click_pop_core import (
+    allocate_slot,
+    expire_circles,
+    find_display_for_point,
+    map_coords,
+    trail_sample_reached,
+    trail_segment_transform,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -230,8 +237,10 @@ def _detect_screen_size():
 # ---------------------------------------------------------------------------
 _listener = None          # pynput Listener thread
 _click_queue = deque()    # thread‑safe (deque.append / popleft are atomic in CPython)
+_trail_queue = deque()    # queued (start_x, start_y, end_x, end_y, is_left, time)
 _timer_active = False
 _active_clicks = []       # list of (source_name, expire_time)
+_active_trails = []       # list of (source_name, expire_time)
 _retina_scale = 1.0       # macOS Retina backing scale factor (2.0 on HiDPI)
 _all_displays = []        # list of display descriptors from _detect_all_displays()
 _captured_display = None  # display dict for the monitor being captured (or None)
@@ -242,6 +251,10 @@ _multi_capture_mode = False  # True when "(all)" is selected
 # OBS_COMBO_TYPE_EDITABLE stores the label text as the setting value,
 # NOT the programmatic value parameter, so we must match on this label.
 _ALL_CAPTURES_LABEL = "(all - auto detect)"
+_TRAIL_MAX_SEGMENTS = 16
+_TRAIL_LEFT_COLOR = 0xFF0000FF
+_TRAIL_RIGHT_COLOR = 0xFFFF0000
+_OBS_ALIGN_CENTER = 0
 
 # Settings with defaults
 _settings = {
@@ -254,6 +267,10 @@ _settings = {
     "max_circles": 5,
     "capture_source": "",
     "override_monitor": False,
+    "trail_enabled": True,
+    "trail_width": 8,
+    "trail_duration_ms": 350,
+    "trail_spacing": 10,
 }
 
 # ---------------------------------------------------------------------------
@@ -263,7 +280,7 @@ _settings = {
 def script_description():
     return (
         "<h2>Click Pop</h2>"
-        "<p>Renders a circle in the OBS scene on every mouse click — "
+        "<p>Renders click circles and live drag trails in the OBS scene — "
         "visible only in recordings / streams, <b>not</b> on the actual desktop.</p>"
         "<p>Requires the <code>pynput</code> Python package.</p>"
     )
@@ -286,6 +303,22 @@ def script_properties():
     obs.obs_properties_add_int(
         props, "circle_size", "Circle diameter (px)", 20, 300, 5,
     )
+
+    trail_enabled_prop = obs.obs_properties_add_bool(
+        props, "trail_enabled", "Show drag trails",
+    )
+    obs.obs_property_set_modified_callback(trail_enabled_prop, _on_trail_toggle)
+    trail_width_prop = obs.obs_properties_add_int(
+        props, "trail_width", "Trail line width (px)", 1, 40, 1,
+    )
+    trail_duration_prop = obs.obs_properties_add_int(
+        props, "trail_duration_ms", "Trail duration (ms)", 100, 2000, 50,
+    )
+    trail_spacing_prop = obs.obs_properties_add_int(
+        props, "trail_spacing", "Trail sampling distance (px)", 2, 100, 1,
+    )
+    for trail_prop in (trail_width_prop, trail_duration_prop, trail_spacing_prop):
+        obs.obs_property_set_visible(trail_prop, _settings["trail_enabled"])
 
     override_prop = obs.obs_properties_add_bool(
         props, "override_monitor", "Override monitor dimensions",
@@ -339,6 +372,15 @@ def _on_override_toggle(props, prop, settings):
     return True
 
 
+def _on_trail_toggle(props, prop, settings):
+    """Show or hide trail-specific controls when trails are toggled."""
+    enabled = obs.obs_data_get_bool(settings, "trail_enabled")
+    for name in ("trail_width", "trail_duration_ms", "trail_spacing"):
+        trail_prop = obs.obs_properties_get(props, name)
+        obs.obs_property_set_visible(trail_prop, enabled)
+    return True
+
+
 def _add_display_info(props):
     """Add informational text showing detected displays."""
     if not _all_displays:
@@ -371,6 +413,10 @@ def script_defaults(settings):
     )
     obs.obs_data_set_default_int(settings, "duration_ms", 350)
     obs.obs_data_set_default_int(settings, "circle_size", 60)
+    obs.obs_data_set_default_bool(settings, "trail_enabled", True)
+    obs.obs_data_set_default_int(settings, "trail_width", 8)
+    obs.obs_data_set_default_int(settings, "trail_duration_ms", 350)
+    obs.obs_data_set_default_int(settings, "trail_spacing", 10)
     mon_w, mon_h = _detect_screen_size()
     obs.obs_data_set_default_int(settings, "monitor_w", mon_w)
     obs.obs_data_set_default_int(settings, "monitor_h", mon_h)
@@ -384,6 +430,12 @@ def script_update(settings):
     _settings["right_image"] = obs.obs_data_get_string(settings, "right_image")
     _settings["duration_ms"] = obs.obs_data_get_int(settings, "duration_ms")
     _settings["circle_size"] = obs.obs_data_get_int(settings, "circle_size")
+    _settings["trail_enabled"] = obs.obs_data_get_bool(settings, "trail_enabled")
+    _settings["trail_width"] = obs.obs_data_get_int(settings, "trail_width")
+    _settings["trail_duration_ms"] = obs.obs_data_get_int(settings, "trail_duration_ms")
+    _settings["trail_spacing"] = obs.obs_data_get_int(settings, "trail_spacing")
+    if not _settings["trail_enabled"]:
+        _trail_queue.clear()
     _settings["override_monitor"] = obs.obs_data_get_bool(settings, "override_monitor")
     _settings["monitor_w"] = obs.obs_data_get_int(settings, "monitor_w")
     _settings["monitor_h"] = obs.obs_data_get_int(settings, "monitor_h")
@@ -489,12 +541,43 @@ def _start_listener():
         obs.script_log(obs.LOG_ERROR, "pynput is not installed. Run: pip install pynput")
         return
 
+    drag_anchors = {}
+
+    def trail_side(button):
+        if button == Button.left:
+            return True
+        if button == Button.right:
+            return False
+        return None
+
+    def on_move(x, y):
+        if not _settings["trail_enabled"]:
+            drag_anchors.clear()
+            return
+
+        now = time.time()
+        spacing = _settings["trail_spacing"]
+        for button, start in list(drag_anchors.items()):
+            if trail_sample_reached(*start, x, y, spacing):
+                is_left = trail_side(button)
+                _trail_queue.append((*start, x, y, is_left, now))
+                drag_anchors[button] = (x, y)
+
     def on_click(x, y, button, pressed):
         if pressed:
             is_left = (button == Button.left)
             _click_queue.append((x, y, is_left, time.time()))
+            if _settings["trail_enabled"] and trail_side(button) is not None:
+                drag_anchors[button] = (x, y)
+            return
 
-    _listener = Listener(on_click=on_click)
+        start = drag_anchors.pop(button, None)
+        if start is None or not _settings["trail_enabled"]:
+            return
+        if start != (x, y):
+            _trail_queue.append((*start, x, y, trail_side(button), time.time()))
+
+    _listener = Listener(on_move=on_move, on_click=on_click)
     _listener.daemon = True
     _listener.start()
 
@@ -929,11 +1012,19 @@ def _get_capture_transform(scene, source_name=None):
 def _poll_clicks():
     now = time.time()
     duration_s = _settings["duration_ms"] / 1000.0
+    trail_duration_s = _settings["trail_duration_ms"] / 1000.0
 
     # Drain new clicks from the queue
     while _click_queue:
         x, y, is_left, t = _click_queue.popleft()
         _spawn_circle(x, y, is_left, t + duration_s)
+
+    # Drain new trail segments from the queue
+    while _trail_queue:
+        start_x, start_y, end_x, end_y, is_left, t = _trail_queue.popleft()
+        _spawn_trail_segment(
+            start_x, start_y, end_x, end_y, is_left, t + trail_duration_s,
+        )
 
     # Expire old circles
     still_active, expired = expire_circles(_active_clicks, now)
@@ -941,15 +1032,20 @@ def _poll_clicks():
         _hide_source(name)
     _active_clicks[:] = still_active
 
+    still_active, expired = expire_circles(_active_trails, now)
+    for name in expired:
+        _hide_source(name)
+    _active_trails[:] = still_active
 
-def _spawn_circle(x, y, is_left, expire_time):
-    """Create or reuse an image source and position it at (x, y).
 
-    Coordinates (x, y) are in virtual-desktop space (as reported by pynput).
-    Multi-monitor aware: determines which display was clicked, converts to
-    display-local coordinates, and discards clicks on non-captured displays.
+def _map_desktop_point(x, y, item_size=0):
+    """Map a virtual-desktop point to the OBS canvas and its capture route.
+
+    Returns ``(obs_x, obs_y, route)`` or ``None`` when the point does not
+    belong to a captured display.  The route identifies the display and
+    capture source so callers can avoid joining points across captures.
     """
-    # --- Multi-monitor: determine which display the click landed on ---
+    # --- Multi-monitor: determine which display the point landed on ---
     # Only use per-display logic when multiple displays are detected.
     # Single-display setups fall through to the legacy path so that the
     # user's manual monitor_w / monitor_h settings are always respected.
@@ -962,13 +1058,13 @@ def _spawn_circle(x, y, is_left, expire_time):
             if display is not None and display["id"] in _display_capture_map:
                 capture_source_name = _display_capture_map[display["id"]]["source_name"]
             else:
-                return  # no capture source for this display
+                return None  # no capture source for this display
         else:
-            # If a specific display is being captured, discard clicks on other
+            # If a specific display is being captured, discard points on other
             # displays.  Only applies when we have multiple displays — single
             # display should never discard.
             if _captured_display is not None and display is not _captured_display:
-                return
+                return None
 
     # Use display-specific values when a multi-monitor hit was found,
     # otherwise fall back to settings (preserves single-display behavior).
@@ -984,17 +1080,6 @@ def _spawn_circle(x, y, is_left, expire_time):
         mon_w = _settings["monitor_w"]
         mon_h = _settings["monitor_h"]
         retina = _retina_scale
-
-    # Pick a source name from a pool so we can show multiple simultaneous
-    prefix = "__click_pop_L_" if is_left else "__click_pop_R_"
-    max_c = _settings["max_circles"]
-
-    src_name, evicted = allocate_slot(prefix, max_c, _active_clicks)
-    if evicted is not None:
-        _hide_source(evicted)
-
-    image_path = _settings["left_image"] if is_left else _settings["right_image"]
-    size = _settings["circle_size"]
 
     # Map mouse coords → OBS canvas coords
     scene_src = obs.obs_frontend_get_current_scene()
@@ -1037,10 +1122,54 @@ def _spawn_circle(x, y, is_left, expire_time):
 
     obs_x, obs_y = map_coords(phys_x, phys_y, canvas_w, canvas_h,
                               phys_mon_w, phys_mon_h,
-                              size, **kwargs)
+                              item_size, **kwargs)
+
+    route = (
+        display["id"] if display is not None else None,
+        capture_source_name or _settings["capture_source"],
+    )
+    return (obs_x, obs_y, route)
+
+
+def _spawn_circle(x, y, is_left, expire_time):
+    """Create or reuse an image source and position it at (x, y)."""
+    size = _settings["circle_size"]
+    mapped = _map_desktop_point(x, y, size)
+    if mapped is None:
+        return
+    obs_x, obs_y, _ = mapped
+
+    # Pick a source name from a pool so we can show multiple simultaneous
+    prefix = "__click_pop_L_" if is_left else "__click_pop_R_"
+    max_c = _settings["max_circles"]
+
+    src_name, evicted = allocate_slot(prefix, max_c, _active_clicks)
+    if evicted is not None:
+        _hide_source(evicted)
+
+    image_path = _settings["left_image"] if is_left else _settings["right_image"]
 
     _show_source(src_name, image_path, obs_x, obs_y, size)
     _active_clicks.append((src_name, expire_time))
+
+
+def _spawn_trail_segment(start_x, start_y, end_x, end_y, is_left, expire_time):
+    """Render one drag span when both endpoints share a capture route."""
+    start = _map_desktop_point(start_x, start_y)
+    end = _map_desktop_point(end_x, end_y)
+    if start is None or end is None or start[2] != end[2]:
+        return
+
+    prefix = "__click_pop_TRAIL_L_" if is_left else "__click_pop_TRAIL_R_"
+    # Keep a full-pool source alive and update it in place to avoid a visible
+    # gap between removing the old segment and creating the replacement.
+    src_name, _ = allocate_slot(prefix, _TRAIL_MAX_SEGMENTS, _active_trails)
+
+    color = _TRAIL_LEFT_COLOR if is_left else _TRAIL_RIGHT_COLOR
+    if _show_trail_segment(
+            src_name, color, start[0], start[1], end[0], end[1],
+            _settings["trail_width"]):
+        _active_trails.append((src_name, expire_time))
 
 
 # ---------------------------------------------------------------------------
@@ -1107,6 +1236,66 @@ def _show_source(name, image_path, x, y, size):
     obs.obs_sceneitem_set_visible(scene_item, True)
 
 
+def _show_trail_segment(name, color, start_x, start_y, end_x, end_y, width):
+    transform = trail_segment_transform(
+        start_x, start_y, end_x, end_y, width,
+    )
+    if transform is None:
+        return False
+
+    scene = _get_current_scene()
+    if scene is None:
+        return False
+
+    scene_item = obs.obs_scene_find_source(scene, name)
+    if scene_item is None:
+        source = obs.obs_get_source_by_name(name)
+        if source is None:
+            settings = obs.obs_data_create()
+            obs.obs_data_set_int(settings, "color", color)
+            obs.obs_data_set_int(settings, "width", 1)
+            obs.obs_data_set_int(settings, "height", 1)
+            source_id = obs.obs_get_latest_input_type_id("color_source")
+            source = obs.obs_source_create(
+                source_id or "color_source", name, settings, None,
+            )
+            obs.obs_data_release(settings)
+            if source is None:
+                return False
+        else:
+            settings = obs.obs_source_get_settings(source)
+            obs.obs_data_set_int(settings, "color", color)
+            obs.obs_data_set_int(settings, "width", 1)
+            obs.obs_data_set_int(settings, "height", 1)
+            obs.obs_source_update(source, settings)
+            obs.obs_data_release(settings)
+        scene_item = obs.obs_scene_add(scene, source)
+        obs.obs_source_release(source)
+    else:
+        source = obs.obs_sceneitem_get_source(scene_item)
+        settings = obs.obs_source_get_settings(source)
+        obs.obs_data_set_int(settings, "color", color)
+        obs.obs_data_set_int(settings, "width", 1)
+        obs.obs_data_set_int(settings, "height", 1)
+        obs.obs_source_update(source, settings)
+        obs.obs_data_release(settings)
+
+    center_x, center_y, rotation, length, line_width = transform
+    pos = obs.vec2()
+    pos.x = center_x
+    pos.y = center_y
+    obs.obs_sceneitem_set_alignment(scene_item, _OBS_ALIGN_CENTER)
+    obs.obs_sceneitem_set_pos(scene_item, pos)
+    obs.obs_sceneitem_set_rot(scene_item, rotation)
+
+    scale = obs.vec2()
+    scale.x = length
+    scale.y = line_width
+    obs.obs_sceneitem_set_scale(scene_item, scale)
+    obs.obs_sceneitem_set_visible(scene_item, True)
+    return True
+
+
 def _hide_source(name):
     scene = _get_current_scene()
     if scene is None:
@@ -1121,9 +1310,14 @@ def _cleanup_sources():
     scene = _get_current_scene()
     if scene is None:
         return
-    max_c = _settings["max_circles"]
-    for prefix in ("__click_pop_L_", "__click_pop_R_"):
-        for i in range(max_c):
+    pools = (
+        ("__click_pop_L_", _settings["max_circles"]),
+        ("__click_pop_R_", _settings["max_circles"]),
+        ("__click_pop_TRAIL_L_", _TRAIL_MAX_SEGMENTS),
+        ("__click_pop_TRAIL_R_", _TRAIL_MAX_SEGMENTS),
+    )
+    for prefix, pool_size in pools:
+        for i in range(pool_size):
             name = f"{prefix}{i}"
             scene_item = obs.obs_scene_find_source(scene, name)
             if scene_item is not None:
@@ -1133,3 +1327,4 @@ def _cleanup_sources():
                 obs.obs_source_remove(source)
                 obs.obs_source_release(source)
     _active_clicks.clear()
+    _active_trails.clear()

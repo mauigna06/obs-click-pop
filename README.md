@@ -1,8 +1,8 @@
 # Click Pop for OBS
 
-Show mouse click indicators **only in your OBS recordings/streams** — invisible on the actual desktop.
+Show mouse click indicators and drag trails **only in your OBS recordings/streams** — invisible on the actual desktop.
 
-By default, left clicks show a red circle and right clicks show a blue circle. Indicators disappear after a configurable duration. Replace the included PNGs with any transparent image to customize the shape, color, and style.
+By default, left clicks and drags are red, while right clicks and drags are blue. Indicators disappear after a configurable duration. Replace the included PNGs with any transparent image to customize the click shape, color, and style.
 
 ![Demo](obs-click-pop-demo.gif)
 
@@ -14,6 +14,7 @@ Your viewers will see exactly where you clicked, but you don't see any click ove
 ## Features
 
 - Left/right click differentiation with customizable indicator images
+- Live continuous trails for left- and right-button drags
 - Crop-aware coordinate mapping — works correctly when your Display Capture source is cropped via:
   - Source Properties (e.g. XSHM "Crop Left/Top")
   - Edit Transform / Alt-drag
@@ -21,6 +22,7 @@ Your viewers will see exactly where you clicked, but you don't see any click ove
 - Auto-detection of Display Capture sources with an editable dropdown
 - Correct handling of OBS bounding box scaling modes (Scale Inner, Stretch, etc.)
 - Configurable circle size, duration, and max simultaneous circles
+- Configurable trail width, duration, and sampling distance
 - Works on 4K monitors with scaled canvas output
 - Supports multi-monitor setups
 - Supports Retina displays
@@ -77,11 +79,15 @@ If your distro's OBS package was built against a different Python version, match
    - **Left/Right-click images** — what overlay graphic to use for left and right clicks. By default, red and blue circles are used.
    - **Circle duration** — how long each indicator stays visible (default 350 ms)
    - **Circle diameter** — size in pixels (default 60)
+   - **Show drag trails** — enable or disable live trails (enabled by default)
+   - **Trail line width** — line width in OBS canvas pixels (default 8)
+   - **Trail duration** — how long each trail segment stays visible (default 350 ms)
+   - **Trail sampling distance** — pointer travel between segments (default 10 pixels/points; lower values look smoother but use more sources)
    - **Monitor width/height** — your display resolution (auto-detected but overrideable)
    - **Max simultaneous circles** — how many indicators can show at once (default 5)
    - **Display Capture source** — select your Display Capture from the dropdown for crop-aware positioning (leave blank if no crop is applied)
 4. Click **Start Listener**
-5. Start recording — clicks will appear as colored circles in the output
+5. Start recording — clicks and drag trails will appear in the output
 
 ### Cropped Display Capture
 
@@ -90,7 +96,7 @@ If your Display Capture source is cropped to a sub-region of your screen, select
 
 ## Customization
 
-Replace the PNG files with your own designs. Any transparent PNG works — the script will scale it to the configured circle diameter.
+Replace the PNG files with your own designs. Any transparent PNG works — the script will scale it to the configured circle diameter. Drag trails use fixed red and blue OBS Color Sources for left and right buttons.
 
 
 ## Tips
@@ -113,18 +119,19 @@ You need to click on "Refresh Displays":
 
 ## Known Limitations
 
-- No drag visualization (only click points)
-- Circle appears at click position instantly (no fade-in/fade-out animation)
+- Click circles and trail segments appear and disappear instantly (no fade-in/fade-out animation)
+- Each mouse button caches up to 16 trail segments; expired segments are hidden for reuse and a longer drag updates the oldest segment in place
 
 
 ## How It Works
 
-1. A `pynput` background thread listens for mouse clicks globally
-2. Click events are queued and processed by an OBS timer callback (~60 fps)
-3. For each click, an OBS Image Source is created/repositioned in the current scene
+1. A `pynput` background thread listens for mouse clicks and drag movement globally
+2. Click and trail-segment events are queued and processed by an OBS timer callback (~60 fps)
+3. Clicks use OBS Image Sources; trail segments use scaled and rotated OBS Color Sources
 4. Mouse coordinates are mapped from monitor space to OBS canvas space, accounting for any crop and scale transforms on the Display Capture
-5. After the configured duration, the source is hidden
-6. The indicators are **composited into the OBS output** — they exist only in the recording
+5. Trail segments never bridge different displays or Display Capture sources
+6. After each configured duration, click and trail sources are hidden for reuse
+7. The indicators are **composited into the OBS output** — they exist only in the recording
 
 
 ## Developer Notes
@@ -138,8 +145,8 @@ python -m venv .venv
 ```
 
 The test suite includes:
-- **Tier 1** — Pure logic tests (coordinate mapping, slot allocation, circle expiration)
-- **Tier 2** — Mock OBS integration tests (positioning, ref management, visibility)
+- **Tier 1** — Pure logic tests (coordinate mapping, slot allocation, expiration, trail geometry)
+- **Tier 2** — Mock OBS integration tests (positioning, ref management, visibility, listener state, trail rendering)
 - **E2E stubs** — Marked `@pytest.mark.e2e`, skipped by default (require a running OBS instance)
 
 

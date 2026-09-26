@@ -47,6 +47,8 @@ def _make_mock_obs(*, scene_source_width=1920, scene_source_height=1080,
     mock.LOG_INFO = 0
     mock.LOG_ERROR = 1
     mock.OBS_PATH_FILE = 0
+    mock.OBS_ALIGN_CENTER = 0
+    mock.obs_get_latest_input_type_id.return_value = "color_source_v3"
 
     # vec2 factory
     mock.vec2 = Vec2
@@ -150,8 +152,10 @@ def obs_script(mock_obs):
     # Reset mutable globals
     obs_click_pop._listener = None
     obs_click_pop._click_queue.clear()
+    obs_click_pop._trail_queue.clear()
     obs_click_pop._timer_active = False
     obs_click_pop._active_clicks.clear()
+    obs_click_pop._active_trails.clear()
     obs_click_pop._display_capture_map = {}
     obs_click_pop._multi_capture_mode = False
 
