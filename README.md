@@ -1,6 +1,6 @@
 # Click Pop for OBS
 
-Show mouse click indicators and drag trails **only in your OBS recordings/streams** — invisible on the actual desktop.
+Show mouse click indicators, drag trails, and optional cursor movement trails **only in your OBS recordings/streams** — invisible on the actual desktop.
 
 By default, left clicks and drags are red, while right clicks and drags are blue. Indicators disappear after a configurable duration. Replace the included PNGs with any transparent image to customize the click shape, color, and style.
 
@@ -15,6 +15,7 @@ Your viewers will see exactly where you clicked, but you don't see any click ove
 
 - Left/right click differentiation with customizable indicator images
 - Live continuous trails for left- and right-button drags
+- Optional trail for cursor movement without holding a mouse button
 - Crop-aware coordinate mapping — works correctly when your Display Capture source is cropped via:
   - Source Properties (e.g. XSHM "Crop Left/Top")
   - Edit Transform / Alt-drag
@@ -80,6 +81,7 @@ If your distro's OBS package was built against a different Python version, match
    - **Circle duration** — how long each indicator stays visible (default 350 ms)
    - **Circle diameter** — size in pixels (default 60)
    - **Show drag trails** — enable or disable live trails (enabled by default)
+   - **Show trail for all cursor movement** — also show a red trail while moving without holding a mouse button (disabled by default)
    - **Trail line width** — line width in OBS canvas pixels (default 8)
    - **Trail duration** — how long each trail segment stays visible (default 350 ms)
    - **Trail sampling distance** — pointer travel between segments (default 10 pixels/points; lower values look smoother but use more sources)
@@ -96,7 +98,7 @@ If your Display Capture source is cropped to a sub-region of your screen, select
 
 ## Customization
 
-Replace the PNG files with your own designs. Any transparent PNG works — the script will scale it to the configured circle diameter. Drag trails use fixed red and blue OBS Color Sources for left and right buttons.
+Replace the PNG files with your own designs. Any transparent PNG works — the script will scale it to the configured circle diameter. Drag trails use fixed red and blue OBS Color Sources for left and right buttons. Cursor movement without a held button uses the red trail style.
 
 
 ## Tips
@@ -125,7 +127,7 @@ You need to click on "Refresh Displays":
 
 ## How It Works
 
-1. A `pynput` background thread listens for mouse clicks and drag movement globally
+1. A `pynput` background thread listens for mouse clicks and movement globally
 2. Click and trail-segment events are queued and processed by an OBS timer callback (~60 fps)
 3. Clicks use OBS Image Sources; trail segments use scaled and rotated OBS Color Sources
 4. Mouse coordinates are mapped from monitor space to OBS canvas space, accounting for any crop and scale transforms on the Display Capture

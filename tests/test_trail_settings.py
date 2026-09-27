@@ -15,6 +15,9 @@ def test_script_properties_adds_trail_controls(obs_script, mock_obs, monkeypatch
     mock_obs.obs_properties_add_bool.assert_any_call(
         props, "trail_enabled", "Show drag trails",
     )
+    mock_obs.obs_properties_add_bool.assert_any_call(
+        props, "cursor_trail_enabled", "Show trail for all cursor movement",
+    )
     mock_obs.obs_properties_add_int.assert_any_call(
         props, "trail_width", "Trail line width (px)", 1, 40, 1,
     )
@@ -26,15 +29,18 @@ def test_script_properties_adds_trail_controls(obs_script, mock_obs, monkeypatch
     )
 
 
-def test_script_defaults_include_enabled_trails(obs_script, mock_obs, monkeypatch):
+def test_script_defaults_include_trail_settings(obs_script, mock_obs, monkeypatch):
     monkeypatch.setattr(obs_script, "_detect_screen_size", lambda: (1920, 1080))
     settings = MagicMock(name="settings")
 
     obs_script.script_defaults(settings)
 
-    mock_obs.obs_data_set_default_bool.assert_has_calls([
-        call(settings, "trail_enabled", True),
-    ])
+    mock_obs.obs_data_set_default_bool.assert_any_call(
+        settings, "trail_enabled", True,
+    )
+    mock_obs.obs_data_set_default_bool.assert_any_call(
+        settings, "cursor_trail_enabled", False,
+    )
     mock_obs.obs_data_set_default_int.assert_has_calls([
         call(settings, "trail_width", 8),
         call(settings, "trail_duration_ms", 350),
@@ -47,6 +53,7 @@ def test_script_update_reads_trail_settings_and_clears_disabled_queue(
     monkeypatch.setattr(obs_script, "_refresh_displays", lambda: None)
     mock_obs.obs_data_get_bool.side_effect = lambda settings, name: {
         "trail_enabled": False,
+        "cursor_trail_enabled": True,
         "override_monitor": True,
     }.get(name, False)
     mock_obs.obs_data_get_int.side_effect = lambda settings, name: {
@@ -64,6 +71,7 @@ def test_script_update_reads_trail_settings_and_clears_disabled_queue(
     obs_script.script_update(MagicMock(name="settings"))
 
     assert obs_script._settings["trail_enabled"] is False
+    assert obs_script._settings["cursor_trail_enabled"] is True
     assert obs_script._settings["trail_width"] == 12
     assert obs_script._settings["trail_duration_ms"] == 600
     assert obs_script._settings["trail_spacing"] == 18
@@ -74,6 +82,7 @@ def test_trail_toggle_updates_dependent_property_visibility(obs_script, mock_obs
     props = MagicMock(name="props")
     settings = MagicMock(name="settings")
     fields = {
+        "cursor_trail_enabled": MagicMock(name="cursor_trail_enabled"),
         "trail_width": MagicMock(name="trail_width"),
         "trail_duration_ms": MagicMock(name="trail_duration_ms"),
         "trail_spacing": MagicMock(name="trail_spacing"),

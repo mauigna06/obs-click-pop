@@ -35,8 +35,9 @@ def mouse_buttons(monkeypatch):
     return buttons
 
 
-def start_callbacks(obs_script, mouse_buttons):
+def start_callbacks(obs_script, mouse_buttons, *, cursor_trail_enabled=False):
     obs_script._settings["trail_enabled"] = True
+    obs_script._settings["cursor_trail_enabled"] = cursor_trail_enabled
     obs_script._settings["trail_spacing"] = 10
     obs_script._start_listener()
     return FakeListener.latest.callbacks
@@ -48,6 +49,34 @@ def test_plain_move_does_not_enqueue_trail(obs_script, mouse_buttons):
     callbacks["on_move"](20, 20)
 
     assert not obs_script._trail_queue
+
+
+def test_plain_move_enqueues_trail_when_cursor_trail_enabled(
+        obs_script, mouse_buttons, monkeypatch):
+    monkeypatch.setattr(obs_script.time, "time", lambda: 12.5)
+    callbacks = start_callbacks(
+        obs_script, mouse_buttons, cursor_trail_enabled=True,
+    )
+
+    callbacks["on_move"](10, 20)
+    callbacks["on_move"](19, 20)
+    assert not obs_script._trail_queue
+    callbacks["on_move"](20, 20)
+
+    assert list(obs_script._trail_queue) == [(10, 20, 20, 20, True, 12.5)]
+
+
+def test_cursor_trail_does_not_duplicate_drag(obs_script, mouse_buttons):
+    callbacks = start_callbacks(
+        obs_script, mouse_buttons, cursor_trail_enabled=True,
+    )
+
+    callbacks["on_move"](0, 0)
+    callbacks["on_click"](0, 0, mouse_buttons.left, True)
+    callbacks["on_move"](10, 0)
+
+    assert len(obs_script._trail_queue) == 1
+    assert obs_script._trail_queue[0][:5] == (0, 0, 10, 0, True)
 
 
 def test_press_keeps_click_and_threshold_move_enqueues_trail(

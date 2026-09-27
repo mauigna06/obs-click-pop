@@ -268,6 +268,7 @@ _settings = {
     "capture_source": "",
     "override_monitor": False,
     "trail_enabled": True,
+    "cursor_trail_enabled": False,
     "trail_width": 8,
     "trail_duration_ms": 350,
     "trail_spacing": 10,
@@ -280,7 +281,8 @@ _settings = {
 def script_description():
     return (
         "<h2>Click Pop</h2>"
-        "<p>Renders click circles and live drag trails in the OBS scene — "
+        "<p>Renders click circles, drag trails, and optional cursor trails "
+        "in the OBS scene — "
         "visible only in recordings / streams, <b>not</b> on the actual desktop.</p>"
         "<p>Requires the <code>pynput</code> Python package.</p>"
     )
@@ -308,6 +310,9 @@ def script_properties():
         props, "trail_enabled", "Show drag trails",
     )
     obs.obs_property_set_modified_callback(trail_enabled_prop, _on_trail_toggle)
+    cursor_trail_prop = obs.obs_properties_add_bool(
+        props, "cursor_trail_enabled", "Show trail for all cursor movement",
+    )
     trail_width_prop = obs.obs_properties_add_int(
         props, "trail_width", "Trail line width (px)", 1, 40, 1,
     )
@@ -317,7 +322,9 @@ def script_properties():
     trail_spacing_prop = obs.obs_properties_add_int(
         props, "trail_spacing", "Trail sampling distance (px)", 2, 100, 1,
     )
-    for trail_prop in (trail_width_prop, trail_duration_prop, trail_spacing_prop):
+    for trail_prop in (
+            cursor_trail_prop, trail_width_prop, trail_duration_prop,
+            trail_spacing_prop):
         obs.obs_property_set_visible(trail_prop, _settings["trail_enabled"])
 
     override_prop = obs.obs_properties_add_bool(
@@ -375,7 +382,9 @@ def _on_override_toggle(props, prop, settings):
 def _on_trail_toggle(props, prop, settings):
     """Show or hide trail-specific controls when trails are toggled."""
     enabled = obs.obs_data_get_bool(settings, "trail_enabled")
-    for name in ("trail_width", "trail_duration_ms", "trail_spacing"):
+    for name in (
+            "cursor_trail_enabled", "trail_width", "trail_duration_ms",
+            "trail_spacing"):
         trail_prop = obs.obs_properties_get(props, name)
         obs.obs_property_set_visible(trail_prop, enabled)
     return True
@@ -414,6 +423,7 @@ def script_defaults(settings):
     obs.obs_data_set_default_int(settings, "duration_ms", 350)
     obs.obs_data_set_default_int(settings, "circle_size", 60)
     obs.obs_data_set_default_bool(settings, "trail_enabled", True)
+    obs.obs_data_set_default_bool(settings, "cursor_trail_enabled", False)
     obs.obs_data_set_default_int(settings, "trail_width", 8)
     obs.obs_data_set_default_int(settings, "trail_duration_ms", 350)
     obs.obs_data_set_default_int(settings, "trail_spacing", 10)
@@ -431,6 +441,9 @@ def script_update(settings):
     _settings["duration_ms"] = obs.obs_data_get_int(settings, "duration_ms")
     _settings["circle_size"] = obs.obs_data_get_int(settings, "circle_size")
     _settings["trail_enabled"] = obs.obs_data_get_bool(settings, "trail_enabled")
+    _settings["cursor_trail_enabled"] = obs.obs_data_get_bool(
+        settings, "cursor_trail_enabled",
+    )
     _settings["trail_width"] = obs.obs_data_get_int(settings, "trail_width")
     _settings["trail_duration_ms"] = obs.obs_data_get_int(settings, "trail_duration_ms")
     _settings["trail_spacing"] = obs.obs_data_get_int(settings, "trail_spacing")
@@ -542,6 +555,7 @@ def _start_listener():
         return
 
     drag_anchors = {}
+    cursor_anchor = None
 
     def trail_side(button):
         if button == Button.left:
@@ -551,8 +565,10 @@ def _start_listener():
         return None
 
     def on_move(x, y):
+        nonlocal cursor_anchor
         if not _settings["trail_enabled"]:
             drag_anchors.clear()
+            cursor_anchor = None
             return
 
         now = time.time()
@@ -563,7 +579,24 @@ def _start_listener():
                 _trail_queue.append((*start, x, y, is_left, now))
                 drag_anchors[button] = (x, y)
 
+        if drag_anchors:
+            cursor_anchor = (x, y)
+            return
+
+        if not _settings["cursor_trail_enabled"]:
+            cursor_anchor = None
+            return
+
+        if cursor_anchor is None:
+            cursor_anchor = (x, y)
+        elif trail_sample_reached(*cursor_anchor, x, y, spacing):
+            _trail_queue.append((*cursor_anchor, x, y, True, now))
+            cursor_anchor = (x, y)
+
     def on_click(x, y, button, pressed):
+        nonlocal cursor_anchor
+        if _settings["cursor_trail_enabled"]:
+            cursor_anchor = (x, y)
         if pressed:
             is_left = (button == Button.left)
             _click_queue.append((x, y, is_left, time.time()))
